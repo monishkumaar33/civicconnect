@@ -15,9 +15,16 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   phone: { type: String, required: true },
   password: { type: String, required: true },
-  role: { type: String, enum: ['citizen', 'admin'], default: 'citizen' },
+  role: { type: String, enum: ['citizen', 'admin', 'authority'], default: 'citizen' },
   address: { type: String },
   isActive: { type: Boolean, default: true },
+  department: { type: String },
+  location: {
+    coordinates: {
+      latitude: { type: Number },
+      longitude: { type: Number }
+    }
+  },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -27,7 +34,7 @@ const issueSchema = new mongoose.Schema({
   category: {
     type: String,
     required: true,
-    enum: ['pothole', 'streetlight', 'trash', 'graffiti', 'traffic', 'drainage', 'other']
+    enum: ['pothole', 'streetlight', 'trash', 'graffiti', 'traffic', 'drainage', 'water', 'electricity', 'other']
   },
   priority: {
     type: String,
@@ -99,6 +106,43 @@ const calculateTargetResolutionTime = (upvotes, priority, createdAt) => {
   return targetTime;
 };
 
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+const departmentMapping = {
+  pothole: 'Public Works',
+  streetlight: 'Public Works',
+  trash: 'Sanitation',
+  graffiti: 'Parks & Recreation',
+  traffic: 'Traffic Management',
+  drainage: 'Public Works',
+  water: 'Water Works',
+  electricity: 'Electricity Board',
+  other: 'General Services'
+};
+
+async function findNearestAuthority(department, latitude, longitude) {
+  const filter = { role: 'authority', isActive: true };
+  if (department) filter.department = department;
+  const authorities = await User.find(filter).select('department location.coordinates');
+  let nearest = null;
+  let best = Infinity;
+  for (const auth of authorities) {
+    const coords = auth.location && auth.location.coordinates;
+    if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') continue;
+    const d = haversineDistance(latitude, longitude, coords.latitude, coords.longitude);
+    if (d < best) { best = d; nearest = auth; }
+  }
+  return nearest;
+}
+
 async function seedDatabase() {
   try {
     // Clear existing data
@@ -110,7 +154,7 @@ async function seedDatabase() {
     // Create demo users
     const hashedPassword = await bcrypt.hash('password123', 10);
     
-    const users = await User.insertMany([
+    const baseUsers = [
       {
         name: 'John Doe',
         email: 'citizen@demo.com',
@@ -120,12 +164,20 @@ async function seedDatabase() {
         address: '123 Main Street, Anytown, USA'
       },
       {
-        name: 'Admin User',
-        email: 'admin@demo.com',
+        name: 'Admin One',
+        email: 'admin1@demo.com',
         phone: '+1-555-0100',
         password: hashedPassword,
         role: 'admin',
         address: 'City Hall, Government District'
+      },
+      {
+        name: 'Admin Two',
+        email: 'admin2@demo.com',
+        phone: '+1-555-0104',
+        password: hashedPassword,
+        role: 'admin',
+        address: 'City Hall Annex'
       },
       {
         name: 'Jane Smith',
@@ -143,227 +195,97 @@ async function seedDatabase() {
         role: 'citizen',
         address: '789 Pine Street, Anytown, USA'
       }
-    ]);
+    ];
 
-    console.log('👥 Created demo users');
+    const authorityUsers = [
+      // Public Works
+      { name: 'PW - Alice', email: 'alice.pw@demo.com', phone: '+1-555-0201', password: hashedPassword, role: 'authority', department: 'Public Works', location: { coordinates: { latitude: 40.7580, longitude: -73.9855 } } },
+      { name: 'PW - Bob', email: 'bob.pw@demo.com', phone: '+1-555-0202', password: hashedPassword, role: 'authority', department: 'Public Works', location: { coordinates: { latitude: 40.7400, longitude: -73.9900 } } },
+      // Sanitation
+      { name: 'SAN - Carla', email: 'carla.san@demo.com', phone: '+1-555-0203', password: hashedPassword, role: 'authority', department: 'Sanitation', location: { coordinates: { latitude: 40.7484, longitude: -73.9857 } } },
+      // Parks & Recreation
+      { name: 'PARK - Dan', email: 'dan.park@demo.com', phone: '+1-555-0204', password: hashedPassword, role: 'authority', department: 'Parks & Recreation', location: { coordinates: { latitude: 40.7308, longitude: -73.9973 } } },
+      // Traffic Management
+      { name: 'TRF - Eva', email: 'eva.trf@demo.com', phone: '+1-555-0205', password: hashedPassword, role: 'authority', department: 'Traffic Management', location: { coordinates: { latitude: 40.7615, longitude: -73.9777 } } },
+      // Water Works
+      { name: 'WATER - Frank', email: 'frank.water@demo.com', phone: '+1-555-0206', password: hashedPassword, role: 'authority', department: 'Water Works', location: { coordinates: { latitude: 40.7510, longitude: -73.9905 } } },
+      // Electricity Board
+      { name: 'ELEC - Gina', email: 'gina.elec@demo.com', phone: '+1-555-0207', password: hashedPassword, role: 'authority', department: 'Electricity Board', location: { coordinates: { latitude: 40.7830, longitude: -73.9710 } } },
+      // General Services
+      { name: 'GEN - Hank', email: 'hank.gen@demo.com', phone: '+1-555-0208', password: hashedPassword, role: 'authority', department: 'General Services', location: { coordinates: { latitude: 40.7359, longitude: -74.0031 } } }
+    ];
+
+    const users = await User.insertMany([...baseUsers, ...authorityUsers]);
+
+    console.log('👥 Created demo users (citizens, admins, authorities)');
 
     // Create demo issues with timing features
     const citizenUsers = users.filter(user => user.role === 'citizen');
     
-    // Create issues with different timing scenarios
-    const now = new Date();
-    const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
-    const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000);
-    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
-    
     const issues = [
+      // Public Works - pothole near Alice
       {
         title: 'Large pothole on Main Street causing traffic issues',
-        description: 'There is a significant pothole at the intersection of Main Street and 5th Avenue. It\'s about 2 feet wide and causing cars to swerve dangerously. This has been an ongoing issue for the past month and is getting worse with recent rains.',
+        description: 'Significant pothole at Main & 5th.',
         category: 'pothole',
         priority: 'high',
-        status: 'in-progress',
-        upvotes: 15,
-        upvotedBy: [citizenUsers[1]._id, citizenUsers[2]._id], // Some users upvoted
-        location: {
-          address: 'Main Street & 5th Avenue, Anytown, USA',
-          coordinates: { latitude: 40.7589, longitude: -73.9851 }
-        },
-        reporter: citizenUsers[0]._id,
-        assignedTo: { department: 'Public Works' },
-        comments: [
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'We have received your report and dispatched a crew to assess the situation. Repair work is scheduled for next Tuesday.',
-            timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-          }
-        ],
-        estimatedResolution: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        createdAt: fiveDaysAgo
-      },
-      {
-        title: 'Broken streetlight near Central Park',
-        description: 'The streetlight at the north entrance of Central Park has been out for over a week. This area gets quite dark at night and poses a safety risk for pedestrians and joggers.',
-        category: 'streetlight',
-        priority: 'medium',
         status: 'pending',
-        upvotes: 8,
-        upvotedBy: [citizenUsers[0]._id, citizenUsers[2]._id],
-        location: {
-          address: 'Central Park North Entrance, Anytown, USA',
-          coordinates: { latitude: 40.7831, longitude: -73.9712 }
-        },
-        reporter: citizenUsers[1]._id,
-        assignedTo: { department: 'Public Works' },
-        createdAt: threeDaysAgo
+        upvotes: 10,
+        location: { address: 'Main & 5th', coordinates: { latitude: 40.7589, longitude: -73.9851 } },
+        reporter: citizenUsers[0]._id,
+        assignedTo: { department: departmentMapping['pothole'] }
       },
+      // Sanitation - trash near Carla
       {
         title: 'Overflowing garbage bins on Oak Avenue',
-        description: 'The garbage bins along Oak Avenue between 2nd and 3rd street have been overflowing for several days. Trash is scattered around the area and it\'s becoming unsanitary.',
+        description: 'Bins overflowing along Oak Ave.',
         category: 'trash',
-        priority: 'high',
-        status: 'resolved',
-        upvotes: 12,
-        upvotedBy: [citizenUsers[0]._id, citizenUsers[1]._id],
-        location: {
-          address: 'Oak Avenue between 2nd & 3rd Street, Anytown, USA',
-          coordinates: { latitude: 40.7505, longitude: -73.9934 }
-        },
-        reporter: citizenUsers[2]._id,
-        assignedTo: { department: 'Sanitation' },
-        resolvedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
-        comments: [
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Sanitation crew has been dispatched to empty the bins and clean up the area.',
-            timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-          },
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Issue has been resolved. Bins emptied and area cleaned. We\'ve also scheduled more frequent pickups for this location.',
-            timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000)
-          }
-        ],
-        createdAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000)
-      },
-      {
-        title: 'Graffiti on downtown bridge underpass',
-        description: 'There\'s extensive graffiti vandalism on the walls of the bridge underpass on Commerce Street. While some of it might be artistic, much of it is inappropriate and detracts from the area.',
-        category: 'graffiti',
-        priority: 'low',
+        priority: 'medium',
         status: 'pending',
-        location: {
-          address: 'Commerce Street Bridge Underpass, Anytown, USA',
-          coordinates: { latitude: 40.7282, longitude: -74.0776 }
-        },
-        reporter: citizenUsers[0]._id,
-        assignedTo: { department: 'Parks & Recreation' },
-        createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
-      },
-      {
-        title: 'Malfunctioning traffic signal causing delays',
-        description: 'The traffic light at the intersection of Broadway and 1st Street is stuck on red in all directions. This is causing significant traffic backups during rush hours.',
-        category: 'traffic',
-        priority: 'high',
-        status: 'in-progress',
-        location: {
-          address: 'Broadway & 1st Street, Anytown, USA',
-          coordinates: { latitude: 40.7614, longitude: -73.9776 }
-        },
+        location: { address: 'Oak Ave', coordinates: { latitude: 40.7505, longitude: -73.9934 } },
         reporter: citizenUsers[1]._id,
-        assignedTo: { department: 'Traffic Management' },
-        estimatedResolution: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000),
-        comments: [
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Traffic management team has been notified. We have a temporary traffic director on site and are working to fix the signal.',
-            timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000)
-          }
-        ],
-        createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000)
+        assignedTo: { department: departmentMapping['trash'] }
       },
-      {
-        title: 'Blocked storm drain causing flooding',
-        description: 'The storm drain on Maple Street is completely blocked with leaves and debris. During the last rainfall, water backed up and flooded the sidewalk and part of the street.',
-        category: 'drainage',
-        priority: 'medium',
-        status: 'pending',
-        location: {
-          address: '200 block of Maple Street, Anytown, USA',
-          coordinates: { latitude: 40.7410, longitude: -73.9897 }
-        },
-        reporter: citizenUsers[2]._id,
-        assignedTo: { department: 'Public Works' },
-        createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000)
-      },
-      {
-        title: 'Dangerous tree branch hanging over sidewalk',
-        description: 'There\'s a large tree branch that looks like it could fall at any moment on Elm Street. It\'s hanging directly over the sidewalk where children walk to school.',
-        category: 'other',
-        priority: 'high',
-        status: 'resolved',
-        location: {
-          address: '150 Elm Street, Anytown, USA',
-          coordinates: { latitude: 40.7350, longitude: -73.9950 }
-        },
-        reporter: citizenUsers[0]._id,
-        assignedTo: { department: 'Parks & Recreation' },
-        resolvedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-        comments: [
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Tree service crew dispatched immediately due to safety concern.',
-            timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000)
-          },
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Dangerous branch has been safely removed. Thanks for reporting this safety hazard.',
-            timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000)
-          }
-        ],
-        createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000)
-      },
-      // Add some overdue issues to showcase the timing feature
-      {
-        title: 'Dangerous sinkhole on Elm Street',
-        description: 'A large sinkhole has appeared on Elm Street near the school. It\'s about 3 feet deep and poses a serious safety hazard to pedestrians and vehicles. This needs immediate attention.',
-        category: 'pothole',
-        priority: 'high',
-        status: 'pending',
-        upvotes: 25,
-        upvotedBy: [citizenUsers[0]._id, citizenUsers[1]._id, citizenUsers[2]._id],
-        location: {
-          address: 'Elm Street near Elementary School, Anytown, USA',
-          coordinates: { latitude: 40.7505, longitude: -73.9934 }
-        },
-        reporter: citizenUsers[0]._id,
-        assignedTo: { department: 'Public Works' },
-        createdAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000) // 2 days ago
-      },
-      {
-        title: 'Blocked storm drain causing flooding',
-        description: 'The storm drain on Maple Avenue is completely blocked with debris. During yesterday\'s rain, water was backing up and flooding the street. This will get worse with more rain.',
-        category: 'drainage',
-        priority: 'medium',
-        status: 'pending',
-        upvotes: 18,
-        upvotedBy: [citizenUsers[1]._id, citizenUsers[2]._id],
-        location: {
-          address: 'Maple Avenue & 4th Street, Anytown, USA',
-          coordinates: { latitude: 40.7282, longitude: -74.0776 }
-        },
-        reporter: citizenUsers[2]._id,
-        assignedTo: { department: 'Public Works' },
-        createdAt: new Date(now.getTime() - 4 * 24 * 60 * 60 * 1000) // 4 days ago
-      },
+      // Water - broken main near Frank
       {
         title: 'Broken water main flooding residential area',
-        description: 'A water main has burst on Pine Street and is flooding several residential properties. Water is running down the street and into basements. This is an emergency situation.',
-        category: 'other',
+        description: 'Water main burst on Pine St.',
+        category: 'water',
         priority: 'high',
-        status: 'in-progress',
-        upvotes: 30,
-        upvotedBy: [citizenUsers[0]._id, citizenUsers[1]._id, citizenUsers[2]._id],
-        location: {
-          address: 'Pine Street Residential Area, Anytown, USA',
-          coordinates: { latitude: 40.7614, longitude: -73.9776 }
-        },
-        reporter: citizenUsers[1]._id,
-        assignedTo: { department: 'Public Works' },
-        comments: [
-          {
-            user: users.find(u => u.role === 'admin')._id,
-            message: 'Emergency crew dispatched. Water shutoff valve located and being activated.',
-            timestamp: new Date(now.getTime() - 1 * 60 * 60 * 1000) // 1 hour ago
-          }
-        ],
-        createdAt: new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000) // 6 days ago
+        status: 'pending',
+        location: { address: 'Pine St', coordinates: { latitude: 40.7512, longitude: -73.9906 } },
+        reporter: citizenUsers[2]._id,
+        assignedTo: { department: departmentMapping['water'] }
+      },
+      // Electricity - outage near Gina
+      {
+        title: 'Power outage on Central Park North',
+        description: 'Area blackout affecting several blocks.',
+        category: 'electricity',
+        priority: 'high',
+        status: 'pending',
+        location: { address: 'Central Park North', coordinates: { latitude: 40.7831, longitude: -73.9712 } },
+        reporter: citizenUsers[0]._id,
+        assignedTo: { department: departmentMapping['electricity'] }
       }
     ];
 
-    await Issue.insertMany(issues);
-    console.log('🎯 Created demo issues');
+    // Insert and auto-assign nearest authority in seed
+    const createdIssues = await Issue.insertMany(issues);
+
+    for (const issue of createdIssues) {
+      const dept = issue.assignedTo && issue.assignedTo.department;
+      const { latitude, longitude } = issue.location.coordinates;
+      const nearest = await findNearestAuthority(dept, latitude, longitude);
+      if (nearest) {
+        issue.assignedTo.assignee = nearest._id;
+      }
+      issue.targetResolutionTime = calculateTargetResolutionTime(issue.upvotes, issue.priority, issue.createdAt);
+      issue.isOverdue = new Date() > issue.targetResolutionTime && !['resolved', 'rejected'].includes(issue.status);
+      await issue.save();
+    }
+
+    console.log('🎯 Created demo issues with nearest authority assignment');
     
     // Calculate target resolution times for all issues
     const allIssues = await Issue.find({});
@@ -377,7 +299,11 @@ async function seedDatabase() {
     console.log('\n✅ Database seeded successfully!');
     console.log('\n📧 Demo Login Credentials:');
     console.log('👤 Citizen: citizen@demo.com / password123');
-    console.log('🔐 Admin: admin@demo.com / password123');
+    console.log('🔐 Admins: admin1@demo.com, admin2@demo.com / password123');
+    console.log('🏛️ Authorities:');
+    console.log('  alice.pw@demo.com, bob.pw@demo.com, carla.san@demo.com');
+    console.log('  dan.park@demo.com, eva.trf@demo.com, frank.water@demo.com');
+    console.log('  gina.elec@demo.com, hank.gen@demo.com  (password123)');
     console.log('\n🚀 Start the application with:');
     console.log('Backend: npm run dev');
     console.log('Frontend: npm start');
