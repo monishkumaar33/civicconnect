@@ -42,17 +42,9 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   phone: { type: String, required: true },
   password: { type: String, required: true },
-  role: { type: String, enum: ['citizen', 'admin', 'authority'], default: 'citizen' },
+  role: { type: String, enum: ['citizen', 'admin'], default: 'citizen' },
   address: { type: String },
   isActive: { type: Boolean, default: true },
-  // Authority-specific fields
-  department: { type: String },
-  location: {
-    coordinates: {
-      latitude: { type: Number },
-      longitude: { type: Number }
-    }
-  },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -65,7 +57,7 @@ const issueSchema = new mongoose.Schema({
   category: {
     type: String,
     required: true,
-    enum: ['pothole', 'streetlight', 'trash', 'graffiti', 'traffic', 'drainage', 'water', 'electricity', 'other']
+    enum: ['pothole', 'streetlight', 'trash', 'graffiti', 'traffic', 'drainage', 'other']
   },
   priority: {
     type: String,
@@ -112,52 +104,6 @@ const issueSchema = new mongoose.Schema({
 
 const Issue = mongoose.model('Issue', issueSchema);
 
-// Helper: calculate distance in km using Haversine formula
-function haversineDistance(lat1, lon1, lat2, lon2) {
-  const toRad = (v) => (v * Math.PI) / 180;
-  const R = 6371; // km
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-async function findNearestAuthority(department, latitude, longitude) {
-  const filter = { role: 'authority', isActive: true };
-  if (department) {
-    filter.department = department;
-  }
-  const authorities = await User.find(filter).select('name department location.coordinates');
-  if (!authorities || authorities.length === 0) return null;
-  let nearest = null;
-  let best = Infinity;
-  for (const auth of authorities) {
-    const coords = auth.location && auth.location.coordinates;
-    if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') continue;
-    const d = haversineDistance(latitude, longitude, coords.latitude, coords.longitude);
-    if (d < best) {
-      best = d;
-      nearest = auth;
-    }
-  }
-  return nearest;
-}
-
-async function sendAssignmentNotification(userId, issueId, type) {
-  try {
-    if (!userId) return;
-    const message = type === 'reassignment' ? 'An issue has been reopened and assigned to you.' : 'A new issue has been assigned to you.';
-    const n = new Notification({ user: userId, issue: issueId, type, message });
-    await n.save();
-  } catch (e) {
-    console.error('Failed to create notification:', e.message);
-  }
-}
-
 // Function to calculate target resolution time based on upvotes and priority
 const calculateTargetResolutionTime = (upvotes, priority, createdAt) => {
   const baseHours = {
@@ -200,18 +146,6 @@ const departmentSchema = new mongoose.Schema({
 });
 
 const Department = mongoose.model('Department', departmentSchema);
-
-// Notification Schema
-const notificationSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  issue: { type: mongoose.Schema.Types.ObjectId, ref: 'Issue' },
-  type: { type: String, enum: ['assignment', 'reassignment'], required: true },
-  message: { type: String, required: true },
-  read: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Notification = mongoose.model('Notification', notificationSchema);
 
 // ============================
 // MIDDLEWARE
@@ -264,7 +198,7 @@ const authenticateToken = (req, res, next) => {
 
 // Admin middleware
 const requireAdmin = (req, res, next) => {
-  if (!['admin', 'authority'].includes(req.user.role)) {
+  if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
@@ -398,8 +332,6 @@ app.post('/api/issues', authenticateToken, upload.array('images', 5), async (req
       'graffiti': 'Parks & Recreation',
       'traffic': 'Traffic Management',
       'drainage': 'Public Works',
-      'water': 'Water Works',
-      'electricity': 'Electricity Board',
       'other': 'General Services'
     };
     
@@ -424,24 +356,9 @@ app.post('/api/issues', authenticateToken, upload.array('images', 5), async (req
     
     // Calculate target resolution time based on priority and upvotes (initially 0)
     issue.targetResolutionTime = calculateTargetResolutionTime(0, priority, issue.createdAt);
-
-    // Geo-assign nearest authority in same department if available
-    const nearest = await findNearestAuthority(
-      departmentMapping[category],
-      issue.location.coordinates.latitude,
-      issue.location.coordinates.longitude
-    );
-    if (nearest) {
-      issue.assignedTo.assignee = nearest._id;
-    }
     
     await issue.save();
     await issue.populate('reporter', 'name email');
-
-    // Notify only the assigned authority
-    if (issue.assignedTo && issue.assignedTo.assignee) {
-      await sendAssignmentNotification(issue.assignedTo.assignee, issue._id, 'assignment');
-    }
     
     res.status(201).json({
       message: 'Issue reported successfully',
@@ -462,9 +379,7 @@ app.get('/api/issues', authenticateToken, async (req, res) => {
       category,
       priority,
       department,
-      reporter,
-      assignee,
-      onlyAssigned
+      reporter
     } = req.query;
     
     // Build filter object
@@ -479,11 +394,7 @@ app.get('/api/issues', authenticateToken, async (req, res) => {
     if (category) filter.category = category;
     if (priority) filter.priority = priority;
     if (department) filter['assignedTo.department'] = department;
-    if (reporter && ['admin','authority'].includes(req.user.role)) filter.reporter = reporter;
-    if (assignee) filter['assignedTo.assignee'] = assignee;
-    if (onlyAssigned && req.user.role === 'authority') {
-      filter['assignedTo.assignee'] = req.user.userId;
-    }
+    if (reporter && req.user.role === 'admin') filter.reporter = reporter;
     
     const issues = await Issue.find(filter)
       .populate('reporter', 'name email phone')
@@ -546,15 +457,10 @@ app.get('/api/issues/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Update Issue Status (Admin and Authority)
-app.put('/api/issues/:id/status', authenticateToken, async (req, res) => {
+// Update Issue Status (Admin only)
+app.put('/api/issues/:id/status', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status, comment, estimatedResolution } = req.body;
-
-    // Only admin or authority can update
-    if (!['admin', 'authority'].includes(req.user.role)) {
-      return res.status(403).json({ error: 'Admin or authority access required' });
-    }
     
     const updateData = {
       status,
@@ -592,50 +498,6 @@ app.put('/api/issues/:id/status', authenticateToken, async (req, res) => {
       message: 'Issue updated successfully',
       issue
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Reopen issue (citizen) and reassign to nearest authority
-app.post('/api/issues/:id/reopen', authenticateToken, async (req, res) => {
-  try {
-    const issue = await Issue.findById(req.params.id).populate('reporter', 'name email');
-    if (!issue) {
-      return res.status(404).json({ error: 'Issue not found' });
-    }
-    // Only the original reporter or admin can reopen
-    const isOwner = issue.reporter && issue.reporter._id.toString() === req.user.userId;
-    if (!(isOwner || req.user.role === 'admin')) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    // Only allow reopen from resolved or rejected
-    if (!['resolved', 'rejected'].includes(issue.status)) {
-      return res.status(400).json({ error: 'Only resolved or rejected issues can be reopened' });
-    }
-
-    issue.status = 'pending';
-    issue.updatedAt = new Date();
-    issue.resolvedAt = undefined;
-
-    // Reassign to nearest authority
-    const dept = issue.assignedTo && issue.assignedTo.department ? issue.assignedTo.department : null;
-    const { latitude, longitude } = issue.location.coordinates;
-    const nearest = await findNearestAuthority(dept, latitude, longitude);
-    if (nearest) {
-      issue.assignedTo.assignee = nearest._id;
-    } else {
-      issue.assignedTo.assignee = undefined;
-    }
-
-    await issue.save();
-
-    // Notify only the assigned authority
-    if (issue.assignedTo && issue.assignedTo.assignee) {
-      await sendAssignmentNotification(issue.assignedTo.assignee, issue._id, 'reassignment');
-    }
-
-    res.json({ message: 'Issue reopened and reassigned', issue });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -788,83 +650,6 @@ app.get('/api/alerts/overdue', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
-// Notifications endpoints
-app.get('/api/notifications', authenticateToken, async (req, res) => {
-  try {
-    const notifications = await Notification.find({ user: req.user.userId })
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .populate('issue', 'title category status');
-    res.json({ notifications });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/notifications/:id/read', authenticateToken, async (req, res) => {
-  try {
-    const updated = await Notification.findOneAndUpdate(
-      { _id: req.params.id, user: req.user.userId },
-      { read: true },
-      { new: true }
-    );
-    if (!updated) return res.status(404).json({ error: 'Notification not found' });
-    res.json({ message: 'Notification marked as read', notification: updated });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Nearby duplicate check
-app.get('/api/issues/duplicates', authenticateToken, async (req, res) => {
-  try {
-    const { category, latitude, longitude, thresholdMeters = 150 } = req.query;
-    if (!category || !latitude || !longitude) {
-      return res.status(400).json({ error: 'category, latitude and longitude are required' });
-    }
-    const lat = parseFloat(latitude);
-    const lon = parseFloat(longitude);
-    const maxMeters = parseFloat(thresholdMeters);
-
-    // Consider only non-rejected issues
-    const candidates = await Issue.find({ category, status: { $ne: 'rejected' } })
-      .select('title location assignedTo upvotes status createdAt')
-      .sort({ createdAt: -1 })
-      .limit(200);
-
-    let best = null;
-    let bestDist = Infinity;
-    for (const issue of candidates) {
-      const coords = issue.location && issue.location.coordinates;
-      if (!coords) continue;
-      const d = haversineDistance(lat, lon, coords.latitude, coords.longitude) * 1000; // meters
-      if (d <= maxMeters && d < bestDist) {
-        bestDist = d;
-        best = issue;
-      }
-    }
-
-    if (!best) {
-      return res.json({ duplicate: null });
-    }
-
-    res.json({
-      duplicate: {
-        _id: best._id,
-        title: best.title,
-        category,
-        status: best.status,
-        upvotes: best.upvotes,
-        address: best.location?.address,
-        coordinates: best.location?.coordinates,
-        distanceMeters: Math.round(bestDist)
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // ============================
 // DASHBOARD/ANALYTICS ROUTES
 // ============================
@@ -874,7 +659,7 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   try {
     const stats = {};
     
-    if (['admin', 'authority'].includes(req.user.role)) {
+    if (req.user.role === 'admin') {
       // Admin stats
       const totalIssues = await Issue.countDocuments();
       const pendingIssues = await Issue.countDocuments({ status: 'pending' });
